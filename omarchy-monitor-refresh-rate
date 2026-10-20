@@ -1,0 +1,457 @@
+#!/bin/bash
+
+# Show or set the refresh rate of a Hyprland monitor.
+#
+# This is the command half of the refresh-rate-toggle plugin. It works on any
+# display Hyprland knows about, not just the one it was installed on: the
+# rates offered come from the monitor's own availableModes.
+#
+#   omarchy-monitor-refresh-rate                     # print the focused display's rate
+#   omarchy-monitor-refresh-rate toggle              # step to the next rate down
+#   omarchy-monitor-refresh-rate 60                  # set a specific rate
+#   omarchy-monitor-refresh-rate list                # list the rates on offer
+#   omarchy-monitor-refresh-rate --monitor DP-2 ...  # act on a specific display
+#
+# The chosen rate is saved to ~/.local/state/omarchy/monitor-refresh-rates and
+# reapplied on every Hyprland reload by the companion Lua module, so it
+# survives a reboot.
+
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE_FILE="$STATE_DIR/monitor-refresh-rates"
+
+monitor=""
+action=""
+supports=""
+current_only=""
+
+while (($#)); do
+  case $1 in
+  --monitor)
+    monitor="${2:-}"
+    shift 2
+    ;;
+  --supports)
+    supports="${2:-}"
+    shift 2
+    ;;
+  --current)
+    current_only="1"
+    shift
+    ;;
+  -h | --help)
+    cat <<'USAGE'
+Usage: omarchy-monitor-refresh-rate [--monitor <name>] [toggle|<rate>|list]
+
+Actions:
+  (none)              print the focused display's rate
+  toggle              switch to the next rate down, wrapping round
+  <rate>              switch to that rate, e.g. 144
+  list                list the rates the display offers
+
+Options:
+  --monitor <name>    act on that display instead of the focused one
+  --supports <rate>   exit 0 if the display offers that rate, 1 if not
+  --current           print the display's rate as a bare number
+  --list-displays     every display, its rate and its rates, tab-delimited
+  --drift-check       report displays that left their saved rate
+  -h, --help          show this help
+USAGE
+    exit 0
+    ;;
+  *)
+    action="$1"
+    shift
+    ;;
+  esac
+done
+
+# The output name is written into a Lua rule and into a shell command, so only
+# a plain connector name may pass.
+if [[ -n $monitor && ! $monitor =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Refusing unsafe monitor name" >&2
+  exit 1
+fi
+
+if [[ -n $supports && ! $supports =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Invalid rate" >&2
+  exit 1
+fi
+
+# The focused display is the default target, so the keybind acts on whatever
+# the user is looking at.
+target_monitor() {
+  if [[ -n $monitor ]]; then
+    echo "$monitor"
+    return
+  fi
+
+  hyprctl monitors -j | jq -r '[.[] | select(.focused == true)][0].name // ""'
+}
+
+monitor_info() {
+  local name="$1"
+  hyprctl monitors all -j | jq -c --arg name "$name" \
+    '.[] | select(.name == $name and .disabled != true)'
+}
+
+# Every display the compositor currently reports, so the menu can list them.
+all_monitors() {
+  hyprctl monitors all -j | jq -r '.[] | select(.disabled != true) | .name'
+}
+
+# The rates a display offers, highest first, as "RATE<TAB>mode" lines. For a
+# rate the display offers at several resolutions, the largest is the one
+# listed, since that is the mode worth switching to.
+#
+# Takes the monitor JSON, so a caller that already has it does not have to
+# ask Hyprland again.
+available_rates_from() {
+  local info="$1"
+  [[ -n $info ]] || return 1
+
+  echo "$info" | jq -r '
+    [.availableModes[]
+     | select(test("^[0-9]+x[0-9]+@"))
+     | capture("^(?<w>[0-9]+)x(?<h>[0-9]+)@(?<rate>[0-9.]+)(?<unit>[A-Za-z]*)$")
+     | select(.unit == "" or .unit == "Hz")
+     | { rate: (.rate | tonumber), w: (.w | tonumber), h: (.h | tonumber),
+         mode: "\(.w)x\(.h)@\(.rate)\(.unit)" }]
+    # One mode per rate: the one with the most pixels.
+    | group_by(.rate) | map(max_by(.w * .h))
+    | sort_by(-.rate)
+    | .[] | "\(.rate)\t\(.mode)"
+  '
+}
+
+available_rates() {
+  local name="$1"
+  local info
+  info="$(monitor_info "$name")"
+  [[ -n $info ]] || return 1
+
+  available_rates_from "$info"
+}
+
+current_rate() {
+  local name="$1"
+  local info
+  info="$(monitor_info "$name")"
+  [[ -n $info ]] || return 1
+  echo "$info" | jq -r '.refreshRate'
+}
+
+# A rate rounded to a whole number, so 143.98 reads as 144 and 59.99 as 60.
+round_rate() {
+  awk -v r="$1" 'BEGIN { printf "%d", r + 0.5 }'
+}
+
+# The same rounding, reading the rate from stdin.
+round_rate_stdin() {
+  awk '{ printf "%d\n", $0 + 0.5 }'
+}
+
+# The mode that matches a target rate, preferring one whose resolution matches
+# what the display is already running. Rates are compared with a tolerance:
+# the monitor reports 143.981 where the mode string says 143.98.
+mode_for_rate() {
+  local name="$1" target="$2"
+  local info rates info_mode match
+
+  info="$(monitor_info "$name")"
+  [[ -n $info ]] || return 1
+  info_mode="$(echo "$info" | jq -r '"\(.width)x\(.height)"')"
+
+  rates="$(available_rates "$name")"
+  [[ -n $rates ]] || return 1
+
+  # Same resolution first, so the rate change does not also move the
+  # resolution and rescale everything on screen.
+  match="$(echo "$rates" | awk -F'\t' -v r="$target" -v res="$info_mode" \
+    '($1 - r < 0.5 && r - $1 < 0.5) && index($2, res "@") == 1 { print $2; exit }')"
+  if [[ -n $match ]]; then
+    echo "$match"
+    return 0
+  fi
+
+  match="$(echo "$rates" | awk -F'\t' -v r="$target" \
+    '($1 - r < 0.5 && r - $1 < 0.5) { print $2; exit }')"
+  if [[ -n $match ]]; then
+    echo "$match"
+    return 0
+  fi
+
+  return 1
+}
+
+# The rate a display is running, and the rate it is supposed to be running.
+# Both are compared with a tolerance, since the monitor reports 143.981 where
+# the mode string says 143.98.
+same_rate() {
+  awk -v a="$1" -v b="$2" 'BEGIN { exit !((a - b < 0.5) && (b - a < 0.5)) }'
+}
+
+# The next rate in the list, stepping down and wrapping around.
+next_rate() {
+  local name="$1"
+  local rates current
+  rates="$(available_rates "$name")"
+  [[ -n $rates ]] || return 1
+  current="$(current_rate "$name")"
+
+  echo "$rates" | awk -F'\t' -v cur="$current" '
+    { list[++n] = $1 }
+    END {
+      # Find the entry the display is actually running, so stepping starts
+      # below the current rate rather than below a near-duplicate of it.
+      best = 0
+      best_diff = 1e9
+      for (i = 1; i <= n; i++) {
+        diff = list[i] - cur
+        if (diff < 0) diff = -diff
+        if (diff < best_diff) { best_diff = diff; best = i }
+      }
+      if (best_diff >= 0.5) {
+        # The current rate is not in the list (an unusual mode). Start at the
+        # highest rate below it, or the highest overall.
+        for (i = 1; i <= n; i++) {
+          if (list[i] < cur) { print list[i]; exit }
+        }
+        print list[1]
+        exit
+      }
+      # The list is sorted highest first, so the next rate down is the next
+      # entry. At the lowest rate, wrap back to the highest.
+      print (best < n ? list[best + 1] : list[1])
+    }
+  '
+}
+
+save_rate() {
+  local name="$1" mode="$2"
+  local tmp
+
+  mkdir -p "$STATE_DIR" || return 1
+  tmp="$(mktemp "$STATE_DIR/.monitor-refresh-rates.XXXXXX")" || return 1
+
+  # Keep every other display's saved rate; replace just this one.
+  if [[ -f $STATE_FILE ]]; then
+    grep -v "^${name}=" "$STATE_FILE" >"$tmp" 2>/dev/null || true
+  fi
+  printf '%s=%s\n' "$name" "$mode" >>"$tmp"
+
+  mv "$tmp" "$STATE_FILE"
+}
+
+# Push a rate to the running session.
+apply_rate() {
+  local name="$1" mode="$2"
+  local info scale
+
+  info="$(monitor_info "$name")"
+  [[ -n $info ]] || return 1
+
+  # Keep the display's current scale; a rule without one lets Hyprland pick
+  # its own default, which is not the scale the user is looking at.
+  scale="$(echo "$info" | jq -r '.scale')"
+
+  hyprctl eval "hl.monitor({ output = \"$name\", mode = \"$mode\", position = \"auto\", scale = $scale })" >/dev/null
+}
+
+notify() {
+  local headline="$1" description="${2:-}"
+  omarchy-notification-send --app-name "omarchy-monitor-refresh-rate" \
+    -g "󰍹" "$headline" "$description" >/dev/null 2>&1 || true
+}
+
+# --list-displays prints every display, its current rate, and the rates it
+# offers, as tab-delimited fields: name, current rate, then one field per
+# offered rate. The panel builds its rows from this.
+if [[ $action == "--list-displays" ]]; then
+  all_monitors | while read -r display; do
+    [[ -n $display ]] || continue
+    info="$(monitor_info "$display")"
+    [[ -n $info ]] || continue
+
+    current="$(echo "$info" | jq -r '.refreshRate' | round_rate_stdin)"
+    rates="$(available_rates "$display" | awk -F'\t' '{ print $1 }' | paste -sd, -)"
+
+    printf '%s\t%s\t%s\n' "$display" "$current" "$rates"
+  done
+  exit 0
+fi
+
+# --drift-check reports the displays that are no longer running the rate saved
+# for them. It writes the names to a marker file and exits quietly, so the
+# Lua side can look for the file and re-apply the saved rates.
+#
+# Only the rate is compared, not the whole mode: a display that was changed
+# to another resolution at the same rate is not drifting, and putting it back
+# would undo the resolution change.
+#
+# This runs as a separate process because hyprctl cannot be called from
+# inside Hyprland's own Lua: the request would go to the very process
+# waiting on it.
+if [[ $action == "--drift-check" ]]; then
+  drift_file="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/monitor-refresh-rate-drift"
+  drifted=""
+
+  if [[ -f $STATE_FILE ]]; then
+    # One hyprctl call for every display, rather than one per display.
+    live="$(hyprctl monitors all -j)"
+
+    while IFS='=' read -r saved_output saved_mode; do
+      [[ -n $saved_output && -n $saved_mode ]] || continue
+
+      info="$(echo "$live" | jq -c --arg name "$saved_output" \
+        '.[] | select(.name == $name and .disabled != true)')"
+      [[ -n $info ]] || continue
+
+      want_rate="$(echo "$saved_mode" | cut -d'@' -f2 | tr -dc '0-9.')"
+      now_rate="$(echo "$info" | jq -r '.refreshRate')"
+
+      # Rates are compared with a tolerance: the monitor reports 143.981
+      # where the mode string says 143.98.
+      if ! awk -v a="$now_rate" -v b="$want_rate" 'BEGIN { exit !((a - b < 0.5) && (b - a < 0.5)) }'; then
+        drifted+="$saved_output"$'\n'
+      fi
+    done <"$STATE_FILE"
+  fi
+
+  if [[ -n $drifted ]]; then
+    mkdir -p "$(dirname "$drift_file")" 2>/dev/null || true
+    printf '%s' "$drifted" >"$drift_file"
+  fi
+
+  exit 0
+fi
+
+# --heal puts a display back on the rate saved for it, at whatever resolution
+# it is running now. It is the self-healing path: something moved the display
+# off its rate, and the saved rate has to be put back without undoing a
+# resolution change the user made on purpose.
+if [[ $action == "--heal" ]]; then
+  healed=0
+
+  if [[ -f $STATE_FILE ]]; then
+    live="$(hyprctl monitors all -j)"
+
+    while IFS='=' read -r saved_output saved_mode; do
+      [[ -n $saved_output && -n $saved_mode ]] || continue
+
+      info="$(echo "$live" | jq -c --arg name "$saved_output" \
+        '.[] | select(.name == $name and .disabled != true)')"
+      [[ -n $info ]] || continue
+
+      want_rate="$(echo "$saved_mode" | cut -d'@' -f2 | tr -dc '0-9.')"
+      now_rate="$(echo "$info" | jq -r '.refreshRate')"
+
+      same_rate "$now_rate" "$want_rate" && continue
+
+      # The mode at the display's current resolution and the saved rate, so
+      # healing the rate does not also move the resolution.
+      current_res="$(echo "$info" | jq -r '"\(.width)x\(.height)"')"
+      mode="$(echo "$live" | jq -r \
+        --arg name "$saved_output" --arg res "$current_res" --arg want "$want_rate" '
+        [.[] | select(.name == $name) | .availableModes[]
+         | select(test("^" + $res + "@"))
+         | capture("^(?<w>[0-9]+)x(?<h>[0-9]+)@(?<rate>[0-9.]+)(?<unit>[A-Za-z]*)$")
+         | select((.rate | tonumber) - ($want | tonumber) < 0.5
+                  and ($want | tonumber) - (.rate | tonumber) < 0.5)
+         | "\(.w)x\(.h)@\(.rate)\(.unit)"]
+        | first // empty' 2>/dev/null)"
+
+      if [[ -z $mode ]]; then
+        # The display is running a resolution it no longer offers, or the
+        # mode list is unreadable. Fall back to the saved mode.
+        mode="$saved_mode"
+      fi
+
+      apply_rate "$saved_output" "$mode" && healed=1
+    done <"$STATE_FILE"
+  fi
+
+  exit $((1 - healed))
+fi
+
+name="$(target_monitor)"
+if [[ -z $name ]]; then
+  echo "No monitor found" >&2
+  exit 1
+fi
+
+# --supports asks whether the display offers a rate, for the menu to show a
+# row only when the row would do something.
+if [[ -n $supports ]]; then
+  available_rates "$name" | awk -F'\t' -v r="$supports" \
+    '($1 - r < 0.5 && r - $1 < 0.5) { found = 1 } END { exit !found }'
+  exit $?
+fi
+
+# --current prints the bare rounded rate of the focused display, for the menu
+# to compare against a row's rate.
+if [[ -n $current_only ]]; then
+  info="$(monitor_info "$name")"
+  if [[ -z $info ]]; then
+    exit 1
+  fi
+  echo "$info" | jq -r '.refreshRate' | round_rate_stdin
+  exit 0
+fi
+
+case "$action" in
+"")
+  info="$(monitor_info "$name")"
+  if [[ -z $info ]]; then
+    echo "No active monitor named $name" >&2
+    exit 1
+  fi
+  echo "$name $(echo "$info" | jq -r '.refreshRate' | round_rate_stdin)Hz"
+  ;;
+list)
+  info="$(monitor_info "$name")"
+  if [[ -z $info ]]; then
+    echo "No active monitor named $name" >&2
+    exit 1
+  fi
+  current="$(current_rate "$name")"
+  available_rates "$name" | while IFS=$'\t' read -r rate mode; do
+    if awk -v a="$rate" -v b="$current" 'BEGIN { exit !((a - b < 0.5) && (b - a < 0.5)) }'; then
+      echo "* $rate Hz ($mode)"
+    else
+      echo "  $rate Hz ($mode)"
+    fi
+  done
+  ;;
+toggle)
+  target="$(next_rate "$name")"
+  mode="$(mode_for_rate "$name" "$target")" || {
+    echo "No mode found for $target Hz" >&2
+    exit 1
+  }
+  # Save first: the state file must never lag behind the display, or the
+  # drift check would see a difference and undo the change.
+  save_rate "$name" "$mode"
+  apply_rate "$name" "$mode" || exit 1
+  notify "Refresh rate: $(round_rate "$target")Hz" "$name"
+  ;;
+*)
+  if [[ ! $action =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "Usage: omarchy-monitor-refresh-rate [--monitor <name>] [toggle|<rate>|list]" >&2
+    echo "Try 'omarchy-monitor-refresh-rate --help' for the full list of flags." >&2
+    exit 1
+  fi
+
+  mode="$(mode_for_rate "$name" "$action")" || {
+    echo "No mode found for $action Hz on $name" >&2
+    available_rates "$name" | awk -F'\t' '{ printf "  %s Hz\n", $1 }' >&2
+    exit 1
+  }
+  # Save first: the state file must never lag behind the display, or the
+  # drift check would see a difference and undo the change.
+  save_rate "$name" "$mode"
+  apply_rate "$name" "$mode" || exit 1
+  notify "Refresh rate: $(round_rate "$action")Hz" "$name"
+  ;;
+esac

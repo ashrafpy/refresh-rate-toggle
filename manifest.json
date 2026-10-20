@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "refresh-rate-toggle",
+  "name": "Refresh Rate",
+  "version": "1.0.0",
+  "author": "ashrafpy",
+  "description": "Switch a display between the refresh rates it supports. Summon with: omarchy-shell shell summon refresh-rate-toggle",
+  "kinds": [
+    "panel"
+  ],
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}

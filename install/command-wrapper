@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Wrapper for the refresh-rate-toggle plugin's command, so it can be called
+# by name from a keybinding or the menu.
+#
+# The plugin owns the implementation; this only finds it. The plugin
+# directory is normally ~/.config/omarchy/plugins/refresh-rate-toggle, but
+# the manifest is what names the plugin, so look that up rather than
+# assuming the directory name.
+
+set -uo pipefail
+
+PLUGIN_ID="refresh-rate-toggle"
+PLUGINS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
+
+plugin_dir() {
+  for manifest in "$PLUGINS_DIR"/*/manifest.json; do
+    [[ -f $manifest ]] || continue
+    if grep -q "\"id\"[[:space:]]*:[[:space:]]*\"$PLUGIN_ID\"" "$manifest"; then
+      dirname "$manifest"
+      return 0
+    fi
+  done
+  return 1
+}
+
+dir="$(plugin_dir)" || {
+  echo "The $PLUGIN_ID plugin is not installed" >&2
+  exit 1
+}
+
+exec "$dir/omarchy-monitor-refresh-rate" "$@"

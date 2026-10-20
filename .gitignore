@@ -1,0 +1,6 @@
+# Nothing to ignore yet: the plugin has no build step and no generated files.
+#
+# The state file, the drift marker and the plugin's own runtime data all live
+# outside this directory:
+#   ~/.local/state/omarchy/monitor-refresh-rates
+#   ~/.local/state/omarchy/monitor-refresh-rate-drift
