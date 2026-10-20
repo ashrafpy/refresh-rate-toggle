@@ -21,8 +21,42 @@ script does that part — it installs the Hyprland shim, the keybindings, the
 command wrapper, and the menu entry. It is idempotent, so running it again
 changes nothing.
 
-If you already have the plugin installed and pull a new version, run
-`setup.sh` again to refresh the files it owns.
+### Reinstalling
+
+`omarchy plugin add` refuses to overwrite a plugin whose id is already
+installed:
+
+```
+omarchy-plugin-add: plugin 'refresh-rate-toggle' is already installed;
+update it with: omarchy plugin update refresh-rate-toggle
+```
+
+So to install again — after a fresh clone, or to move to a new machine —
+remove it first:
+
+```bash
+omarchy plugin remove refresh-rate-toggle --yes
+omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git
+~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
+```
+
+`omarchy plugin remove` deletes the plugin directory and takes the plugin
+out of `shell.json`. It does not touch the four files `setup.sh` installs
+outside it, and `setup.sh` overwrites them anyway, so a reinstall leaves no
+trace of the previous one.
+
+### Updating
+
+`omarchy plugin update` pulls into the installed clone, so it is the copy in
+`~/.config/omarchy/plugins/` that gets updated, not your checkout:
+
+```bash
+omarchy plugin update refresh-rate-toggle --yes
+~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
+```
+
+Run `setup.sh` again afterwards. It refreshes the files it owns — the
+wrapper in particular — and leaves the rest of your config alone.
 
 ## Using it
 
@@ -114,8 +148,21 @@ the shell cannot reach into a plugin directory on their own:
 
 The script also adds a row to the Omarchy menu, under Trigger → Hardware.
 
-It does not remove anything. To uninstall, delete the plugin directory and
-remove the four files above.
+It does not remove anything. To uninstall:
+
+```bash
+omarchy plugin remove refresh-rate-toggle --yes
+rm ~/.config/hypr/monitor-refresh-rate.lua
+rm ~/.local/bin/omarchy-monitor-refresh-rate
+```
+
+Then remove the plugin's block from `~/.config/hypr/monitors.lua`, its two
+`o.bind` lines from `~/.config/hypr/bindings.lua`, and its row from
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`. Each is marked with
+`refresh-rate-toggle` or the plugin's own calls, so they are easy to find.
+
+The saved rates in `~/.local/state/omarchy/monitor-refresh-rates` are left
+behind. Delete that file to forget them.
 
 ## Known issues
 
