@@ -17,9 +17,10 @@ local PLUGIN_ID = "refresh-rate-toggle"
 -- matching on the manifest keeps this working if the directory is renamed.
 local function plugin_dir()
   local root = paths.config_home .. "/omarchy/plugins"
+  local quoted_root = "'" .. root:gsub("'", "'\\''") .. "'"
 
   local pipe = io.popen(
-    "for d in " .. root .. "/*/; do "
+    "for d in " .. quoted_root .. "/*/; do "
       .. "if [ -f \"$d/manifest.json\" ] && grep -q '\"id\"[[:space:]]*:[[:space:]]*\"" .. PLUGIN_ID .. "\"' \"$d/manifest.json\"; then "
       .. "printf '%s' \"${d%/}\"; break; fi; done 2>/dev/null"
   )
@@ -38,12 +39,13 @@ end
 
 local dir = plugin_dir()
 if dir then
-  package.path = dir .. "/?.lua;" .. package.path
+  if not package.path:find(dir .. "/?.lua", 1, true) then
+    package.path = dir .. "/?.lua;" .. package.path
+  end
+  package.loaded["monitor-refresh-rate"] = nil
   local module = require("monitor-refresh-rate")
 
-  -- The drift check runs as a separate process, because hyprctl cannot be
-  -- called from inside the compositor's own Lua. The module needs to know
-  -- where the helper command is to be able to spawn it.
+  -- Expose the helper path on the module for any caller that inspects it.
   module.helper_path = dir .. "/omarchy-monitor-refresh-rate"
 
   return module

@@ -1,221 +1,314 @@
-# Refresh Rate
+# Refresh Rate (`refresh-rate-toggle`)
 
-Switch a display between the refresh rates it actually supports.
+Switch any Hyprland display between the refresh rates it actually supports.
 
-Works on any display Hyprland knows about: the rates come from the monitor's
-own `availableModes`, so a 144Hz panel is offered 144Hz and a 60Hz-only
-external monitor is not offered a rate it cannot reach.
+Rates are read directly from each monitor's `availableModes` in Hyprland, so a
+144Hz panel is offered 144Hz while a 60Hz-only external monitor is never
+offered a rate it cannot reach. Chosen rates are persisted per display and
+automatically reapplied across reboots, `hyprctl reload`, scale changes, and
+laptop clamshell events.
 
-## Install
+---
+
+## Quick Reference
+
+### Plugin Lifecycle
+
+| Task | Command |
+| :--- | :--- |
+| **Install** | `omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git --enable` |
+| **Update** | `omarchy plugin update refresh-rate-toggle --yes` |
+| **Reinstall** | `omarchy plugin remove refresh-rate-toggle --yes && omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git --enable` |
+| **Uninstall** | `~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh --uninstall && omarchy plugin remove refresh-rate-toggle --yes` |
+| **Local Dev Sync** | `./dev.sh` |
+
+### Keybindings & UI
+
+| Action | Shortcut / Path | Command Executed |
+| :--- | :--- | :--- |
+| **Cycle focused display's rate** | `SUPER + SHIFT + R` | `omarchy-monitor-refresh-rate toggle` |
+| **Toggle Refresh Rate panel** | `SUPER + SHIFT + ALT + R` | `omarchy-shell shell toggle refresh-rate-toggle` |
+| **Open panel from Omarchy menu** | Trigger → Hardware → Refresh Rate | `omarchy-shell shell summon refresh-rate-toggle` |
+
+---
+
+## 1. Installation & Lifecycle
+
+### Install
 
 ```bash
-omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git
-~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
-hyprctl reload && omarchy restart shell
+omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git --enable
 ```
 
-`omarchy plugin add` clones the plugin, but it cannot wire the plugin into
-Hyprland: the shell plugin system and the Hyprland config are separate
-systems, and nothing bridges them for third-party plugins. The `setup.sh`
-script does that part — it installs the Hyprland shim, the keybindings, the
-command wrapper, and the menu entry. It is idempotent, so running it again
-changes nothing.
+Passing `--enable` starts `Service.qml` inside `omarchy-shell`, which
+automatically runs `install/setup.sh --auto` to wire the Hyprland Lua shim,
+keybindings, CLI wrapper, and menu entry, and reloads Hyprland.
 
-### Reinstalling
+> **If you ran `omarchy plugin add` without `--enable`:**
+> Run `setup.sh` once to wire the external files, enable the plugin, and
+> reload Hyprland:
+> ```bash
+> ~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
+> ```
 
-`omarchy plugin add` refuses to overwrite a plugin whose id is already
-installed:
-
-```
-omarchy-plugin-add: plugin 'refresh-rate-toggle' is already installed;
-update it with: omarchy plugin update refresh-rate-toggle
-```
-
-So to install again — after a fresh clone, or to move to a new machine —
-remove it first:
-
-```bash
-omarchy plugin remove refresh-rate-toggle --yes
-omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git
-~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
-```
-
-`omarchy plugin remove` deletes the plugin directory and takes the plugin
-out of `shell.json`. It does not touch the four files `setup.sh` installs
-outside it, and `setup.sh` overwrites them anyway, so a reinstall leaves no
-trace of the previous one.
-
-### Updating
-
-`omarchy plugin update` pulls into the installed clone, so it is the copy in
-`~/.config/omarchy/plugins/` that gets updated, not your checkout:
+### Update
 
 ```bash
 omarchy plugin update refresh-rate-toggle --yes
-~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh
 ```
 
-Run `setup.sh` again afterwards. It refreshes the files it owns — the
-wrapper in particular — and leaves the rest of your config alone.
+`omarchy plugin update` pulls the latest changes into
+`~/.config/omarchy/plugins/refresh-rate-toggle` and reloads the plugin in
+`omarchy-shell`. `Service.qml` automatically refreshes the shim and command
+wrapper if either changed.
 
-## Using it
+### Reinstall
 
-| What | How |
-|------|-----|
-| Cycle the focused display's rate | `SUPER + SHIFT + R` |
-| Open the panel (picks a rate per display) | `SUPER + SHIFT + ALT + R` |
-| Same, from the menu | Trigger → Hardware → Refresh Rate |
+`omarchy plugin add` refuses to overwrite an already-installed plugin ID, so
+remove it first before adding it again:
 
-The panel lists every display and the rates it offers, with the running rate
-marked. Enter switches to the next rate; clicking a rate picks it directly.
-
-The rate is saved per display and reapplied on every Hyprland reload, so it
-survives a reboot, a `hyprctl reload`, and a change of scale.
-
-## The command
-
-`omarchy-monitor-refresh-rate` is the command half. With no arguments it
-reports the focused display's rate.
-
+```bash
+omarchy plugin remove refresh-rate-toggle --yes
+omarchy plugin add https://github.com/ashrafpy/refresh-rate-toggle.git --enable
 ```
+
+### Uninstall
+
+Run `setup.sh --uninstall` first to strip the plugin's entries from
+`monitors.lua`, `bindings.lua`, and `omarchy-menu.jsonc` and delete the shim
+and CLI wrapper, then remove the plugin itself:
+
+```bash
+~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh --uninstall
+omarchy plugin remove refresh-rate-toggle --yes
+```
+
+*(Optional)* Remove saved per-display refresh rates:
+
+```bash
+rm -f ~/.local/state/omarchy/monitor-refresh-rates
+```
+
+---
+
+## 2. Using the Panel & Keybindings
+
+- **`SUPER + SHIFT + R`**: Steps the focused display down to the next
+  supported refresh rate (wrapping back to the highest rate after the lowest)
+  and sends a desktop notification.
+- **`SUPER + SHIFT + ALT + R`** (or **Trigger → Hardware → Refresh Rate**):
+  Opens the Refresh Rate overlay panel.
+  - Displays each connected monitor and all refresh rates it supports, with
+    the active rate highlighted.
+  - **`Up` / `Down`**: Select a display.
+  - **`Enter`**: Step the selected display to its next refresh rate.
+  - **Click a rate chip**: Switch that display directly to the clicked rate.
+  - **`Esc` / click outside**: Dismiss the panel.
+
+---
+
+## 3. CLI Reference (`omarchy-monitor-refresh-rate`)
+
+```text
 omarchy-monitor-refresh-rate [options] [action]
+```
+
+### Common Examples
+
+```bash
+# Print the focused display and its current rate (e.g. "eDP-1 144Hz")
+omarchy-monitor-refresh-rate
+
+# Print only the bare rounded rate number of the focused display (e.g. "144")
+omarchy-monitor-refresh-rate --current
+
+# List all rates offered by the focused display (* marks the active rate)
+omarchy-monitor-refresh-rate list
+
+# Cycle the focused display to the next rate down (wraps around to highest)
+omarchy-monitor-refresh-rate toggle
+
+# Switch the focused display to a specific rate
+omarchy-monitor-refresh-rate 60
+
+# Target a specific display by connector name
+omarchy-monitor-refresh-rate --monitor DP-2 list
+omarchy-monitor-refresh-rate --monitor DP-2 144
+omarchy-monitor-refresh-rate --monitor DP-2 toggle
+
+# Check in scripts whether a display supports a given rate (exit 0 = yes, 1 = no)
+omarchy-monitor-refresh-rate --monitor DP-2 --supports 120
+
+# Re-apply saved rates to any display that drifted (preserving current resolution)
+omarchy-monitor-refresh-rate --heal
 ```
 
 ### Actions
 
-| Action | What it does |
-|--------|--------------|
-| *(none)* | Print the focused display's rate, e.g. `eDP-1 60Hz` |
-| `toggle` | Switch to the next rate down, wrapping round to the highest at the bottom |
-| `<rate>` | Switch to that rate, e.g. `144` or `59.99` |
-| `list` | List the rates the display offers, with the running one marked `*` |
+| Action | Description |
+| :--- | :--- |
+| *(none)* | Print the target display's name and current rounded rate (e.g. `eDP-1 60Hz`). |
+| `toggle` | Switch to the next supported rate down, wrapping around to the highest rate after the lowest. |
+| `<rate>` | Switch to a specific refresh rate (e.g. `144`, `60`, or `59.99`). |
+| `list` | List all refresh rates the target display supports, with the active rate marked `*`. |
 
-### Flags
+### Options / Flags
 
-| Flag | What it does | Exit code |
-|------|--------------|-----------|
-| `--monitor <name>` | Act on that display instead of the focused one. Used with any action | 0 on success |
-| `--supports <rate>` | Report whether the display offers that rate. Prints nothing | 0 if it does, 1 if it does not |
-| `--current` | Print the display's rate as a bare number, e.g. `60` | 0 on success, 1 if the display is not there |
-| `--list-displays` | Print every display as `name<TAB>rate<TAB>rate,rate,...` — the format the panel reads | 0 on success |
-| `--drift-check` | Report displays that left their saved rate, by writing their names to `~/.local/state/omarchy/monitor-refresh-rate-drift`. Prints nothing | 0 always |
-| `--heal` | Put every display back on the rate saved for it, at the resolution it is running now | 0 if something was healed, 1 if nothing had drifted |
-| `-h`, `--help` | Print the usage summary | 0 |
+| Flag | Description | Exit Code |
+| :--- | :--- | :--- |
+| `--monitor <name>` | Act on `<name>` instead of the currently focused display. Composes with any action or flag. | `0` on success |
+| `--current` | Print the target display's current rate as a bare integer (e.g. `60`). | `0` on success, `1` if not found |
+| `--supports <rate>` | Quietly test whether the target display offers `<rate>` (within `0.5Hz` tolerance). | `0` if supported, `1` if not |
+| `--list-displays` | Print all active displays as `name<TAB>current<TAB>rate,rate,...` (used by `Service.qml` / `Panel.qml`). | `0` |
+| `--drift-check` | Write names of displays that drifted from their saved rate to `~/.local/state/omarchy/monitor-refresh-rate-drift`. | `0` |
+| `--heal` | Restore every drifted display to its saved refresh rate while keeping its current resolution and scale (and persist any user-made scale change). | `0` if healed, `1` if no drift |
+| `-h`, `--help` | Print usage summary. | `0` |
 
-The flags compose with the actions: `--monitor DP-2 --current` prints
-`DP-2`'s rate, and `--monitor DP-2 144` switches `DP-2` to 144Hz.
+### Error Messages
 
-### Errors
+| Error Message | Cause |
+| :--- | :--- |
+| `Missing monitor name for --monitor` | `--monitor` was passed without a connector argument. |
+| `Missing rate for --supports` | `--supports` was passed without a rate argument. |
+| `Refusing unsafe monitor name` | `--monitor` contained characters outside `A-Z a-z 0-9 . _ -`. |
+| `Invalid rate` | `--supports` was passed a non-numeric value. |
+| `No monitor found` | No focused monitor was reported by Hyprland. |
+| `No active monitor named <name>` | The specified monitor is disconnected or disabled. |
+| `No mode found for <rate> Hz on <name>` | The display does not support `<rate>`. Supported rates are printed below the error. |
+| `Usage: ...` | An unrecognized action was passed. |
 
-| Message | Cause |
-|---------|-------|
-| `Refusing unsafe monitor name` | The name is not a plain connector name. Only `A-Z a-z 0-9 . _ -` pass |
-| `Invalid rate` | `--supports` was given something that is not a number |
-| `No monitor found` | There is no focused display to act on |
-| `No mode found for <rate> Hz on <name>` | The display does not offer that rate. The rates it does offer are listed underneath |
-| `Usage: ...` | The action was not one of the ones above |
+---
 
-## How it works
+## 4. Installer Reference (`install/setup.sh`)
 
-The chosen rate is written to `~/.local/state/omarchy/monitor-refresh-rates`
-as one `output=mode` line per display:
-
+```text
+~/.config/omarchy/plugins/refresh-rate-toggle/install/setup.sh [--auto | --uninstall | --help]
 ```
-eDP-1=1920x1080@59.99Hz
-```
 
-`monitor-refresh-rate.lua` turns each line into a monitor rule and applies it
-after Omarchy's catch-all rule, so the specific rate wins. The rules are
-built from the file's contents rather than evaluated as code, so a malformed
-line can only ever produce an invalid mode, never code execution.
+### `setup.sh` Options
 
-Because the state is a file, the rate survives a reboot, a `hyprctl reload`,
-and a change of scale.
+| Option | Description |
+| :--- | :--- |
+| *(none)* | Install or update all external files, enable the plugin in `omarchy-shell` if needed, and run `hyprctl reload` if any Hyprland config file changed. |
+| `--auto` | Quietly verify and repair external files, calling `hyprctl reload` only if a Hyprland file changed. Invoked automatically by `Service.qml`. |
+| `--uninstall` | Remove the shim and command wrapper, strip the plugin's blocks from `monitors.lua`, `bindings.lua`, and `omarchy-menu.jsonc`, and reload Hyprland. |
+| `-h`, `--help` | Print installer usage summary. |
 
-### Files outside this directory
+### External Files Managed by `setup.sh`
 
-`setup.sh` installs four small files outside the plugin, because Hyprland and
-the shell cannot reach into a plugin directory on their own:
+Because Hyprland's Lua runtime and the user's `PATH` do not automatically look
+inside `~/.config/omarchy/plugins/`, `setup.sh` manages five external items:
 
-- `~/.config/hypr/monitor-refresh-rate.lua` — a shim that puts this plugin's
-  directory on Hyprland's Lua `package.path` and requires the module here.
-- `~/.config/hypr/monitors.lua` — the calls into the plugin: `apply()`,
-  `watch()` and `heal()`. They have to run *after* Omarchy's catch-all rule,
-  which would otherwise claim the display and hand it back its preferred mode.
-- `~/.config/hypr/bindings.lua` — the two keybindings.
-- `~/.local/bin/omarchy-monitor-refresh-rate` — a wrapper that finds this
-  plugin and runs the command, so it can be called by name.
+| Path | Role |
+| :--- | :--- |
+| `~/.config/hypr/monitor-refresh-rate.lua` | Shim that locates this plugin via `manifest.json`, adds it to Hyprland's Lua `package.path`, and loads `monitor-refresh-rate.lua`. |
+| `~/.config/hypr/monitors.lua` | Appends `refresh_rate.apply()`, `refresh_rate.watch()`, and `refresh_rate.heal()` after Omarchy's catch-all monitor rule. |
+| `~/.config/hypr/bindings.lua` | Adds the `SUPER + SHIFT + R` and `SUPER + SHIFT + ALT + R` keybindings. |
+| `~/.local/bin/omarchy-monitor-refresh-rate` | Wrapper script on `PATH` that locates the plugin directory and `exec`s the bundled `omarchy-monitor-refresh-rate`. |
+| `~/.config/omarchy/extensions/omarchy-menu.jsonc` | Adds `trigger.hardware.refresh-rate` (**Trigger → Hardware → Refresh Rate**). |
 
-The script also adds a row to the Omarchy menu, under Trigger → Hardware.
+---
 
-It does not remove anything. To uninstall:
+## 5. Local Development (`./dev.sh`)
+
+When editing this repository locally (e.g. in `~/Projects/refresh-rate-toggle`),
+use `./dev.sh` to test changes live before pushing to GitHub:
 
 ```bash
-omarchy plugin remove refresh-rate-toggle --yes
-rm ~/.config/hypr/monitor-refresh-rate.lua
-rm ~/.local/bin/omarchy-monitor-refresh-rate
+# 1. Validate, sync working tree to ~/.config/omarchy/plugins/refresh-rate-toggle,
+#    run setup.sh, and reload Hyprland + omarchy-shell plugins:
+./dev.sh
+
+# 2. Once satisfied, commit and push to GitHub:
+git add -A && git commit -m "Describe change" && git push
+
+# 3. Pull the pushed commit cleanly via Omarchy's plugin updater:
+omarchy plugin update refresh-rate-toggle --yes
 ```
 
-Then remove the plugin's block from `~/.config/hypr/monitors.lua`, its two
-`o.bind` lines from `~/.config/hypr/bindings.lua`, and its row from
-`~/.config/omarchy/extensions/omarchy-menu.jsonc`. Each is marked with
-`refresh-rate-toggle` or the plugin's own calls, so they are easy to find.
+What `./dev.sh` does:
+1. Validates the checkout with `omarchy-plugin-validate`.
+2. Aligns the installed plugin clone's git `HEAD` with your repo's `HEAD` so
+   `omarchy plugin update` stays fast-forwardable once edits are committed.
+3. Syncs working-tree files (including uncommitted changes) into
+   `~/.config/omarchy/plugins/refresh-rate-toggle`.
+4. Runs `setup.sh`, `hyprctl reload`, and `omarchy-shell shell rescanPlugins`.
 
-The saved rates in `~/.local/state/omarchy/monitor-refresh-rates` are left
-behind. Delete that file to forget them.
+---
 
-## Known issues
+## 6. Architecture & How It Works
 
-**Omarchy's catch-all rule flattens every display to one scale.**
-`monitors.lua` sets `hl.monitor({ output = "", scale = ... })` for all
-displays, so on reload a display you had scaled differently goes back to the
-catch-all's scale. This is Omarchy's behaviour, not this plugin's — it
-reproduces with the plugin's rules removed. The plugin never changes a
-display's scale; it only carries the scale a display already has into the
-rule it writes.
+### State File
 
-**Do not remove the `local omarchy_monitor_scale = ` line from `monitors.lua`.**
-`omarchy-hyprland-monitor-scaling` rewrites that exact line in place to
-persist a scale change, and stops persisting scales if the line is gone or
-renamed. The plugin's installer appends to the file and never touches it.
+Chosen refresh rates and per-display scales are stored in
+`~/.local/state/omarchy/monitor-refresh-rates` as one `output=mode,scale` line
+per display (with backwards compatibility for `output=mode`):
 
-**Omarchy's clamshell handling resets the internal display to its preferred
-mode.** `omarchy-hyprland-monitor-clamshell` re-enables the internal display
-with `mode = "preferred"`, which hands the panel back its fastest rate and
-leaves the saved rate behind in the state file. The plugin's `heal()` loop
-watches for this and puts the rate back, usually within a few seconds. Until
-it was added, a `hyprctl reload` was the only way to undo it.
+```ini
+eDP-1=1920x1080@59.99Hz,1.25
+DP-2=2560x1440@144.00Hz,1
+```
 
-**A resolution change is not undone, but a rate change is.** The heal loop
-compares the *rate* a display is running against the rate saved for it, so
-changing the resolution by hand sticks, and so does a scale change made at
-the same time. Changing the rate by hand does not: the display is put back
-on the saved rate within a few seconds. Delete the display's line from the
-state file to stop the plugin managing it.
+When switching rates (`commit_rate`), the state file is written **before**
+`hyprctl eval` applies the mode so the heal loop can never observe a live rate
+change ahead of the state file and undo it. If `hyprctl eval` fails, the state
+file is rolled back to its previous contents.
 
-**The state file and the running display can disagree for a moment.** The
-rate is written to the state file *before* it is applied to the display, so
-that the heal loop can never race a change and undo it. The trade-off is
-that if the apply then fails, the state file records a rate the display never
-reached. A reload puts the display back on the recorded rate.
+### Runtime Components
 
-**Hyprland's Lua cannot read the live refresh rate.** `hl.get_monitors()`
-reports the name, description, resolution, scale and position of each
-display, but not its refresh rate or current mode. The drift check therefore
-runs as a separate process rather than in Lua.
+1. **[`monitor-refresh-rate.lua`](monitor-refresh-rate.lua) (Hyprland Lua)**
+   - `apply(fallback_scale)`: Reads `~/.local/state/omarchy/monitor-refresh-rates`,
+     validates connector names, mode strings, and per-display scales (never
+     evaluating the file as code), skips any output currently disabled by
+     Omarchy's clamshell/manual-disable toggles in
+     `~/.local/state/omarchy/toggles/hypr/`, and emits `hl.monitor()` rules
+     after Omarchy's catch-all rule in `monitors.lua`.
+   - `watch(scale)`: Re-applies saved rules for enabled displays on
+     `monitor.added`, `monitor.removed`, and `config.reloaded`.
+2. **[`Service.qml`](Service.qml) (Quickshell Background Service)**
+   - Runs `install/setup.sh --auto` on startup and plugin reload.
+   - Keeps `displays` warm in memory and watches the state file via `FileView`
+     so CLI/keybind changes update the UI model without background polling.
+   - Listens to `Hyprland.onRawEvent` (`monitoradded`, `monitorremoved`,
+     `configreloaded`) and runs both event-driven follow-up heals (`1.2s`,
+     `3.5s`, `7.5s`) and a `5s` periodic `--heal` check outside Hyprland's Lua
+     state.
+3. **[`Panel.qml`](Panel.qml) (Quickshell Overlay UI)**
+   - Reads the warm display list from `Service.qml` on open so displays render
+     on the first frame, and delegates rate changes to `Service.qml`.
 
-**`hyprctl` deadlocks when called from inside Hyprland's Lua.** A
-`hyprctl` call made from Hyprland's own Lua goes to the very process that is
-waiting on it, and comes back as `Hyprland IPC didn't respond in time`. The
-plugin works around this by spawning the check with `hl.exec_cmd`, which
-runs outside the compositor's blocked thread. The same applies to
-`io.popen("hyprctl ...")`, which fails the same way.
+---
 
-**A timer that is not self-rearming never fires.** Hyprland's `hl.timer` with
-`{ running = true }` never ticks. The heal loop uses a one-shot timer that
-re-arms itself after each tick, the pattern Omarchy's own clipboard timer
-uses.
+## 7. Technical Notes
 
-**The panel polls while it is open.** The panel refreshes its display list
-every five seconds, so it shows a rate change made elsewhere. It does not
-poll while closed.
+1. **Per-display scale preservation**
+   - Omarchy's stock `monitors.lua` uses a catch-all rule
+     (`hl.monitor({ output = "", scale = omarchy_monitor_scale })`). To prevent
+     reloads or reboots from flattening differently scaled displays to one
+     scale, this plugin saves each display's scale alongside its mode in
+     `~/.local/state/omarchy/monitor-refresh-rates` and updates it when you
+     change a display's scale.
+2. **Clamshell & manual-disable compatibility**
+   - `monitor-refresh-rate.lua` checks
+     `~/.local/state/omarchy/toggles/hypr/internal-monitor-clamshell.lua` and
+     `internal-monitor-disable.lua` before applying rules so a `config.reloaded`
+     or hotplug event never re-enables a closed laptop panel while docked. When
+     the lid is reopened and `omarchy-hyprland-monitor-clamshell` resets the
+     panel to `mode = "preferred"`, `Service.qml` restores the saved refresh
+     rate automatically.
+3. **Resolution preservation & NTSC sibling deduplication**
+   - Switching rates (`toggle` or `<rate>`) and healing (`--heal`) always prefer
+     a mode matching the display's *current* resolution so changing refresh
+     rates never rescales your desktop.
+   - Displays that advertise both nominal and fractional NTSC sibling timings
+     (such as `60.00Hz` and `59.94Hz`, or `120.00Hz` and `119.88Hz`) are
+     deduplicated by rounded whole-number Hz (preferring the largest resolution
+     and highest nominal rate), preventing duplicate `"60 Hz"` chips in the
+     panel and ensuring `toggle` steps cleanly through distinct rates.
+   - To stop the plugin from managing a display, delete its line from
+     `~/.local/state/omarchy/monitor-refresh-rates` (or run
+     `setup.sh --uninstall`).
+4. **Keep `local omarchy_monitor_scale = ...` in `monitors.lua`**
+   - `omarchy-hyprland-monitor-scaling` rewrites that exact line in place to
+     persist default scale changes. `setup.sh` only appends to `monitors.lua`
+     and never modifies that line.

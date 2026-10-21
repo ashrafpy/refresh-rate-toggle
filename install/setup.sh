@@ -2,17 +2,18 @@
 
 # Wire the refresh-rate-toggle plugin into Hyprland and the shell.
 #
-# `omarchy plugin add` only clones the plugin directory. The plugin also
-# needs four things outside it, because Hyprland and the shell cannot reach
-# into a plugin directory on their own:
+# `omarchy plugin add` clones the plugin directory, and when enabled with
+# `--enable`, Service.qml runs `setup.sh --auto` automatically to install the
+# files outside the plugin directory that Hyprland and the shell need:
 #
 #   ~/.config/hypr/monitor-refresh-rate.lua   the shim Hyprland's Lua requires
-#   ~/.config/hypr/monitors.lua                the calls into the plugin
+#   ~/.config/hypr/monitors.lua               the calls into the plugin
 #   ~/.config/hypr/bindings.lua               the keybindings
-#   ~/.local/bin/omarchy-monitor-refresh-rate  the command, callable by name
+#   ~/.local/bin/omarchy-monitor-refresh-rate the command, callable by name
+#   ~/.config/omarchy/extensions/omarchy-menu.jsonc  the Hardware menu entry
 #
-# This script installs all four. It is idempotent: running it twice changes
-# nothing the second time.
+# Running `setup.sh` directly is also supported and idempotent. Pass
+# `--uninstall` to cleanly remove the external files and config blocks.
 
 set -uo pipefail
 
@@ -27,12 +28,45 @@ MONITORS_LUA="$HYPR_DIR/monitors.lua"
 BINDINGS_LUA="$HYPR_DIR/bindings.lua"
 MENU_JSONC="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 
+mode="manual"
+hypr_changed=0
+
+while (($#)); do
+  case $1 in
+  --auto)
+    mode="auto"
+    shift
+    ;;
+  --uninstall)
+    mode="uninstall"
+    shift
+    ;;
+  -h | --help)
+    cat <<'USAGE'
+Usage: setup.sh [--auto|--uninstall]
+
+Options:
+  (none)        install or refresh the plugin's external files and reload
+  --auto        quietly ensure external files are up to date (used by Service.qml)
+  --uninstall   remove the plugin's external files and config blocks
+  -h, --help    show this help
+USAGE
+    exit 0
+    ;;
+  *)
+    echo "setup.sh: unknown option: $1" >&2
+    exit 1
+    ;;
+  esac
+done
+
 fail() {
   echo "setup.sh: $*" >&2
   exit 1
 }
 
 say() {
+  [[ $mode == "auto" ]] && return
   echo "  $1"
 }
 
@@ -40,7 +74,6 @@ say() {
 # identified by the thing that is unique to it, not by the plugin id: the
 # monitors.lua block predates any mention of the id, and matching on the id
 # would append a second copy of it.
-MARKER_SHIM='require("monitor-refresh-rate")'
 MARKER_MONITORS='require("hypr.monitor-refresh-rate")'
 MARKER_BINDINGS='omarchy-monitor-refresh-rate toggle'
 MARKER_MENU='trigger.hardware.refresh-rate'
@@ -54,13 +87,14 @@ install_shim() {
 
   [[ -f $source ]] || fail "missing $source"
 
-  if [[ -f $SHIM ]] && grep -q "$MARKER_SHIM" "$SHIM"; then
-    say "shim already installed"
+  if [[ -f $SHIM ]] && cmp -s "$source" "$SHIM"; then
+    say "shim already up to date"
     return
   fi
 
   mkdir -p "$HYPR_DIR"
   cp "$source" "$SHIM"
+  hypr_changed=1
   say "installed $SHIM"
 }
 
@@ -73,8 +107,11 @@ install_wrapper() {
 
   [[ -f $source ]] || fail "missing $source"
 
-  # The wrapper is overwritten every run on purpose: it belongs to the
-  # plugin, so an update should refresh it.
+  if [[ -f $WRAPPER && -x $WRAPPER ]] && cmp -s "$source" "$WRAPPER"; then
+    say "wrapper already up to date"
+    return
+  fi
+
   mkdir -p "$BIN_DIR"
   cp "$source" "$WRAPPER"
   chmod +x "$WRAPPER"
@@ -108,6 +145,7 @@ refresh_rate.heal()
   # A file that does not exist yet: create one with the catch-all rule the
   # block depends on, then the block itself.
   if [[ ! -f $MONITORS_LUA ]]; then
+    mkdir -p "$HYPR_DIR"
     cat >"$MONITORS_LUA" <<'EOF'
 -- See https://wiki.hypr.land/Configuring/Basics/Monitors/
 -- List current monitors and supported resolutions with: hyprctl monitors all
@@ -118,6 +156,7 @@ local omarchy_monitor_scale = "auto"
 hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
 EOF
+    hypr_changed=1
     say "created $MONITORS_LUA"
   fi
 
@@ -130,6 +169,7 @@ EOF
   # Append it at the end of the file, which is after the catch-all in every
   # stock and hand-edited file.
   printf '%s\n' "$block" >>"$MONITORS_LUA"
+  hypr_changed=1
   say "patched $MONITORS_LUA"
 }
 
@@ -150,10 +190,12 @@ o.bind("SUPER + SHIFT + ALT + R", "Refresh rate panel", "omarchy-shell shell tog
 '
 
   if [[ ! -f $BINDINGS_LUA ]]; then
+    mkdir -p "$HYPR_DIR"
     cat >"$BINDINGS_LUA" <<'EOF'
 -- Keep only your personal keybinding overrides here. Add new bindings or
 -- unbind defaults before replacing them.
 EOF
+    hypr_changed=1
     say "created $BINDINGS_LUA"
   fi
 
@@ -163,6 +205,7 @@ EOF
   fi
 
   printf '%s\n' "$block" >>"$BINDINGS_LUA"
+  hypr_changed=1
   say "patched $BINDINGS_LUA"
 }
 
@@ -191,8 +234,7 @@ EOF
   fi
 
   # The file is JSONC: comments and a trailing comma on the last entry. Add
-  # ours before the closing brace, with a comma after it, so both the shell's
-  # parser and a strict JSON parser are happy.
+  # ours before the closing brace.
   python3 - "$MENU_JSONC" "$entry" <<'PY'
 import re
 import sys
@@ -202,16 +244,34 @@ path, entry = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as handle:
     text = handle.read()
 
-# Drop the trailing comma of the last entry so ours can be appended cleanly.
-text = re.sub(r",(\s*})\s*$", r"\1", text.rstrip())
-
-# Insert before the final closing brace.
 match = re.search(r"}\s*$", text)
 if not match:
     sys.exit("setup.sh: could not find the closing brace of the menu file")
 
-text = text[: match.start()].rstrip().rstrip(",")
-text = text + ",\n" + entry + "\n}\n"
+prefix = text[: match.start()].rstrip()
+lines = prefix.split("\n")
+
+# Walk backwards to find the last line containing non-comment JSON tokens so
+# that if a comma is needed after a previous property, it is placed before any
+# inline or trailing '//' comments rather than after a comment.
+for idx in range(len(lines) - 1, -1, -1):
+    line = lines[idx]
+    comment_match = re.search(r"(^|[ \t])//", line)
+    if comment_match:
+        code = line[: comment_match.start()].rstrip()
+        comment = line[comment_match.start() :]
+    else:
+        code = line.rstrip()
+        comment = ""
+
+    if not code:
+        continue
+
+    if not code.endswith("{") and not code.endswith(","):
+        lines[idx] = code + "," + comment
+    break
+
+text = "\n".join(lines) + "\n" + entry + "\n}\n"
 
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(text)
@@ -220,8 +280,107 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
 
-echo "Setting up $PLUGIN_ID"
+uninstall_all() {
+  echo "Removing $PLUGIN_ID external files and config entries"
+
+  if [[ -f $SHIM ]]; then
+    rm -f "$SHIM"
+    hypr_changed=1
+    say "removed $SHIM"
+  fi
+
+  if [[ -f $WRAPPER ]]; then
+    rm -f "$WRAPPER"
+    say "removed $WRAPPER"
+  fi
+
+  if [[ -f $MONITORS_LUA ]] && grep -q "$MARKER_MONITORS" "$MONITORS_LUA"; then
+    python3 - "$MONITORS_LUA" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+
+pattern = re.compile(
+    r"\n*(?:--[^\n]*\n)*local refresh_rate = require\(\"hypr\.monitor-refresh-rate\"\)\n"
+    r"refresh_rate\.apply\([^\n]*\)\n+"
+    r"(?:--[^\n]*\n)*refresh_rate\.watch\([^\n]*\)\n+"
+    r"(?:--[^\n]*\n)*refresh_rate\.heal\(\)\n*",
+    re.MULTILINE,
+)
+new_text = pattern.sub("\n", text).rstrip() + "\n"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(new_text)
+PY
+    hypr_changed=1
+    say "cleaned $MONITORS_LUA"
+  fi
+
+  if [[ -f $BINDINGS_LUA ]] && grep -q "$MARKER_BINDINGS" "$BINDINGS_LUA"; then
+    python3 - "$BINDINGS_LUA" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+
+pattern = re.compile(
+    r"\n*(?:--[^\n]*\n)*o\.bind\([^\n]*omarchy-monitor-refresh-rate toggle[^\n]*\)\n+"
+    r"(?:--[^\n]*\n)*o\.bind\([^\n]*refresh-rate-toggle[^\n]*\)\n*",
+    re.MULTILINE,
+)
+new_text = pattern.sub("\n", text).rstrip() + "\n"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(new_text)
+PY
+    hypr_changed=1
+    say "cleaned $BINDINGS_LUA"
+  fi
+
+  if [[ -f $MENU_JSONC ]] && grep -q "$MARKER_MENU" "$MENU_JSONC"; then
+    python3 - "$MENU_JSONC" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+
+pattern = re.compile(
+    r"\n*(?:[ \t]*// Refresh rate control[^\n]*\n(?:[ \t]*//[^\n]*\n)*)?[ \t]*\"trigger\.hardware\.refresh-rate\"[^\n]*\n?",
+    re.MULTILINE,
+)
+new_text = pattern.sub("\n", text)
+new_text = re.sub(r"\n{3,}", "\n\n", new_text).rstrip() + "\n"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(new_text)
+PY
+    say "cleaned $MENU_JSONC"
+  fi
+
+  if ((hypr_changed)); then
+    hyprctl reload >/dev/null 2>&1 || true
+  fi
+
+  echo
+  echo "Done. You can now remove the plugin from Omarchy with:"
+  echo "  omarchy plugin remove $PLUGIN_ID --yes"
+}
+
+# ---------------------------------------------------------------------------
+
+if [[ $mode == "uninstall" ]]; then
+  uninstall_all
+  exit 0
+fi
+
+[[ $mode == "auto" ]] || echo "Setting up $PLUGIN_ID"
 
 install_shim
 install_wrapper
@@ -229,11 +388,19 @@ install_monitors_lua
 install_bindings_lua
 install_menu_entry
 
-echo
-echo "Done. Reload Hyprland and the shell for the changes to take effect:"
-echo
-echo "  hyprctl reload"
-echo "  omarchy restart shell"
-echo
-echo "Then try:  SUPER + SHIFT + R       (cycle the rate)"
-echo "            SUPER + SHIFT + ALT + R (open the panel)"
+if ((hypr_changed)); then
+  hyprctl reload >/dev/null 2>&1 || true
+fi
+
+if [[ $mode == "manual" ]]; then
+  # Ensure the plugin is enabled and loaded in omarchy-shell so the user does
+  # not have to enable it or restart the shell by hand.
+  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  if omarchy-plugin-list --json 2>/dev/null | jq -e --arg id "$PLUGIN_ID" 'any(.[]; .id == $id and (.enabled | not))' >/dev/null 2>&1; then
+    omarchy-plugin-enable "$PLUGIN_ID" >/dev/null 2>&1 || true
+  fi
+
+  echo
+  echo "Done. Try:  SUPER + SHIFT + R       (cycle the rate)"
+  echo "            SUPER + SHIFT + ALT + R (open the panel)"
+fi

@@ -21,11 +21,13 @@ Item {
 
   property var shell: null
   property var manifest: null
+  property var service: null
 
   property bool opened: false
   property var displays: []   // [{ name, rate, rates: [rate, ...] }]
   property int selectedIndex: 0
   property bool cursorActive: false
+  property bool refreshPending: false
 
   // The plugin's own directory, so the bundled script is found no matter
   // where the plugin was installed.
@@ -36,11 +38,27 @@ Item {
     return root.pluginDir + "/omarchy-monitor-refresh-rate"
   }
 
+  function syncFromService() {
+    if (!root.service || !Array.isArray(root.service.displays)) return
+    root.displays = root.service.displays
+    if (root.selectedIndex >= root.displays.length)
+      root.selectedIndex = Math.max(0, root.displays.length - 1)
+  }
+
   // ---- data ----
 
   function refresh() {
+    if (root.service && typeof root.service.refresh === "function") {
+      root.syncFromService()
+      root.service.refresh()
+      return
+    }
     if (root.pluginDir === "") return
-    if (listProc.running) return
+    if (listProc.running) {
+      root.refreshPending = true
+      return
+    }
+    root.refreshPending = false
     listProc.command = [root.scriptPath(), "--list-displays"]
     listProc.running = true
   }
@@ -80,6 +98,10 @@ Item {
   // ---- actions ----
 
   function setRate(displayName, rate) {
+    if (root.service && typeof root.service.setRate === "function") {
+      root.service.setRate(displayName, rate)
+      return
+    }
     if (setProc.running) return
     setProc.command = [root.scriptPath(), "--monitor", displayName, String(rate)]
     setProc.running = true
@@ -156,6 +178,12 @@ Item {
       waitForEnd: true
       onStreamFinished: root.parseDisplays(text)
     }
+    onExited: {
+      if (root.refreshPending) {
+        root.refreshPending = false
+        root.refresh()
+      }
+    }
   }
 
   Process {
@@ -174,9 +202,16 @@ Item {
     onTriggered: root.refresh()
   }
 
-  // The host assigns the manifest after the item is constructed, so the
-  // bundled script's path only becomes known then.
-  onManifestChanged: if (manifest) root.refresh()
+  // The host assigns `service` after `manifest`, so sync the warm display
+  // list as soon as `service` arrives; `open()` then refreshes it.
+  onServiceChanged: if (service) root.syncFromService()
+
+  Connections {
+    target: root.service
+    function onDisplaysChanged() {
+      root.syncFromService()
+    }
+  }
 
   // ---- overlay ----
 

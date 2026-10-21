@@ -1,19 +1,21 @@
 -- Applies the refresh rate chosen with omarchy-monitor-refresh-rate.
 --
--- The state file holds one "output=mode" line per display, e.g.
+-- The state file holds one "output=mode" or "output=mode,scale" line per
+-- display, e.g.
 --
---   eDP-1=1920x1080@59.99Hz
+--   eDP-1=1920x1080@59.99Hz,1.25
 --
 -- Each line becomes an hl.monitor() rule, applied after the catch-all rule in
--- monitors.lua so the specific rate wins. The rules are built from the file
--- rather than eval'd as Lua, so a malformed state file can only ever produce an
--- invalid mode, never code execution.
+-- monitors.lua so the specific rate and per-display scale win. The rules are
+-- built from the file rather than eval'd as Lua, so a malformed state file can
+-- only ever produce an invalid mode, never code execution.
 
 local M = {}
 
 local paths = require("default.hypr.paths")
 
 M.state_path = paths.state_home .. "/omarchy/monitor-refresh-rates"
+M.toggles_dir = paths.state_home .. "/omarchy/toggles/hypr"
 
 -- A connector name is used as a Lua string literal, so it must not be able to
 -- close that string.
@@ -35,7 +37,22 @@ local function safe_mode(mode)
   return mode
 end
 
--- Read the saved rates as a list of { output = ..., mode = ... } pairs.
+-- An optional per-display scale saved alongside the mode.
+local function safe_scale(scale)
+  if type(scale) ~= "string" or scale == "" then
+    return nil
+  end
+  if not scale:match("^%d+%.?%d*$") then
+    return nil
+  end
+  local num = tonumber(scale)
+  if not num or num <= 0 then
+    return nil
+  end
+  return num
+end
+
+-- Read the saved rates as a list of { output = ..., mode = ..., scale = ... }.
 function M.saved_rates()
   local rates = {}
   local handle = io.open(M.state_path, "r")
@@ -46,11 +63,19 @@ function M.saved_rates()
   for raw_line in handle:lines() do
     -- Trim the line first: a hand-edited file may pad it with spaces.
     local line = raw_line:gsub("^%s+", ""):gsub("%s+$", "")
-    local output, mode = line:match("^([A-Za-z0-9._-]+)%s*=%s*(.+)$")
+    local output, rhs = line:match("^([A-Za-z0-9._-]+)%s*=%s*(.+)$")
     output = safe_output(output)
-    mode = safe_mode(mode and (mode:gsub("%s+", "")))
-    if output and mode then
-      table.insert(rates, { output = output, mode = mode })
+    if output and rhs then
+      local clean_rhs = rhs:gsub("%s+", "")
+      local raw_mode, raw_scale = clean_rhs:match("^([^,]+),(.+)$")
+      if not raw_mode then
+        raw_mode = clean_rhs
+      end
+      local mode = safe_mode(raw_mode)
+      local scale = safe_scale(raw_scale)
+      if mode then
+        table.insert(rates, { output = output, mode = mode, scale = scale })
+      end
     end
   end
   handle:close()
@@ -58,11 +83,34 @@ function M.saved_rates()
   return rates
 end
 
--- The live scale of each display, so a rule for one display does not drag
--- another display's scale to the same value.
---
--- A monitor rule without a scale makes Hyprland fall back to its own default
--- scale, so every rule here states the scale the display is already running.
+-- Outputs currently disabled by Omarchy's clamshell or manual-disable toggle
+-- files in ~/.local/state/omarchy/toggles/hypr/. Applying a mode rule to an
+-- output that a toggle file disabled would re-enable the panel while the
+-- laptop lid is shut.
+local function disabled_outputs()
+  local disabled = {}
+  local files = {
+    M.toggles_dir .. "/internal-monitor-clamshell.lua",
+    M.toggles_dir .. "/internal-monitor-disable.lua",
+  }
+
+  for _, path in ipairs(files) do
+    local handle = io.open(path, "r")
+    if handle then
+      local content = handle:read("*a") or ""
+      handle:close()
+      for output in content:gmatch('output%s*=%s*"([A-Za-z0-9._-]+)"') do
+        if content:find("disabled%s*=%s*true") then
+          disabled[output] = true
+        end
+      end
+    end
+  end
+
+  return disabled
+end
+
+-- The live scale of each connected display.
 local function live_scales()
   local scales = {}
   local ok, monitors = pcall(hl.get_monitors)
@@ -87,30 +135,26 @@ end
 
 -- Apply the saved rates.
 --
--- `fallback_scale` is the scale the catch-all rule in monitors.lua set. It is
--- only used for a display that is not currently connected, since a live
--- display's own scale is always the better answer.
+-- Prefer the display's live scale if it is already active, then the per-display
+-- scale saved in the state file, and finally `fallback_scale` from monitors.lua.
 function M.apply(fallback_scale)
   local scales = live_scales()
+  local disabled = disabled_outputs()
 
   for _, rate in ipairs(M.saved_rates()) do
-    hl.monitor({
-      output = rate.output,
-      mode = rate.mode,
-      position = "auto",
-      scale = scales[rate.output] or fallback_scale or "auto",
-    })
+    if not disabled[rate.output] then
+      hl.monitor({
+        output = rate.output,
+        mode = rate.mode,
+        position = "auto",
+        scale = scales[rate.output] or rate.scale or fallback_scale or "auto",
+      })
+    end
   end
 end
 
--- Watch for a display being plugged in or unplugged and re-apply the saved
--- rates afterwards.
---
--- Hyprland hands a display back its preferred mode when a monitor rule
--- matches it without a mode, and Omarchy's own clamshell handling does
--- exactly that when it re-enables the internal display. Re-applying the
--- saved rate after the event puts the display back where the user left it,
--- instead of leaving it at the preferred rate until the next reload.
+-- Watch for a display being plugged in or unplugged, or the config reloading,
+-- and re-apply the saved rates for all non-disabled displays.
 function M.watch(scale)
   local function reapply()
     M.apply(scale)
@@ -121,111 +165,10 @@ function M.watch(scale)
   pcall(hl.on, "config.reloaded", reapply)
 end
 
--- Whether a display is running the mode saved for it.
---
--- The saved mode is "WIDTHxHEIGHT@RATE". Hyprland's Lua does not expose the
--- live refresh rate on a monitor object, and hyprctl cannot be called from
--- inside the compositor's own Lua: the request goes to the very process
--- waiting on it and times out. The check is therefore run as a separate
--- process, spawned with hl.exec_cmd, which sits outside that wait.
---
--- The helper writes a marker file naming the displays that drifted; the Lua
--- side reads it back.
-local DRIFT_FILE = paths.state_home .. "/omarchy/monitor-refresh-rate-drift"
-
-local function helper_command(flag)
-  local helper = M.helper_path
-  if not helper then
-    return nil
-  end
-
-  return "sh -c '" .. helper:gsub("'", "'\\''") .. " " .. flag .. " >/dev/null 2>&1'"
-end
-
-local function spawn_drift_check()
-  local command = helper_command("--drift-check")
-  if not command then
-    return
-  end
-
-  hl.exec_cmd(command)
-end
-
--- Put the display back on its saved rate. This is done by the helper, not by
--- the rule here, because the helper can read the display's available modes
--- and pick the one at the resolution it is running now. A rule built here
--- would pin the resolution as well, and undo a resolution change the user
--- made on purpose.
-local function spawn_heal()
-  local command = helper_command("--heal")
-  if not command then
-    return
-  end
-
-  hl.exec_cmd(command)
-end
-
--- Read the drift report the helper wrote, and clear it.
-local function read_drift()
-  local handle = io.open(DRIFT_FILE, "r")
-  if not handle then
-    return {}
-  end
-
-  local drifted = {}
-  for raw_line in handle:lines() do
-    local line = raw_line:gsub("^%s+", ""):gsub("%s+$", "")
-    if line ~= "" then
-      table.insert(drifted, line)
-    end
-  end
-  handle:close()
-
-  os.remove(DRIFT_FILE)
-
-  return drifted
-end
-
--- Put a display back on its saved rate if something moved it.
---
--- Omarchy's clamshell handling re-enables the internal display with
--- mode = "preferred", which hands the panel back its fastest rate and leaves
--- the saved rate behind in the state file. Its reconciliation poll runs every
--- couple of seconds while a laptop is docked, so the display can drift away
--- from the saved rate and stay there. A reload heals it, but waiting for one
--- is not a fix.
---
--- The check is a poll rather than an event because the drift happens through
--- a plain mode change, which fires no monitor event.
---
--- The scale is not needed here: the helper reads the live scale of the
--- display it is putting back, so a scale change made in the meantime is
--- kept.
+-- Retained as a no-op so existing monitors.lua files that call
+-- refresh_rate.heal() continue to work; background drift healing now runs in
+-- Service.qml outside Hyprland's Lua state.
 function M.heal()
-  local armed = false
-
-  local function arm()
-    if armed then
-      return
-    end
-    armed = true
-
-    _G.omarchy_refresh_rate_heal = hl.timer(function()
-      armed = false
-      spawn_drift_check()
-
-      -- The helper is a separate process, so give it a moment to write its
-      -- report before looking for it.
-      _G.omarchy_refresh_rate_read = hl.timer(function()
-        if #read_drift() > 0 then
-          spawn_heal()
-        end
-        arm()
-      end, { interval = 300, timeout = 300, type = "oneshot" })
-    end, { interval = 5000, timeout = 5000, type = "oneshot" })
-  end
-
-  arm()
 end
 
 return M

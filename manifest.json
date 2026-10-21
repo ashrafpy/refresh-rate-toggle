@@ -6,9 +6,11 @@
   "author": "ashrafpy",
   "description": "Switch a display between the refresh rates it supports. Summon with: omarchy-shell shell summon refresh-rate-toggle",
   "kinds": [
-    "panel"
+    "panel",
+    "service"
   ],
   "entryPoints": {
-    "panel": "Panel.qml"
+    "panel": "Panel.qml",
+    "service": "Service.qml"
   }
 }
